@@ -1,13 +1,13 @@
 {-# OPTIONS_GHC -Wno-missing-signatures #-}
+{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE LambdaCase #-}
 module Types
   (  -- * Atomic types
     OS(..)
   , Cluster(..)
-  , Config(..)
+  , Config(..), configFilename
   , CI(..)
-  , ConfigRequest(..)
 
   , AppName(..)
   , BuildJob(..)
@@ -19,10 +19,11 @@ module Types
 
   -- * Misc
   , lshowText
+  , errorT
   )
 where
 
-import           Data.Text                           (Text, toLower)
+import           Data.Text                           (Text, toLower, unpack)
 import           Data.String                         (IsString)
 import qualified Universum
 import           Prelude
@@ -45,19 +46,16 @@ data Config
   | Topology
   deriving (Bounded, Enum, Eq, Show)
 
+configFilename :: Config -> FilePath
+configFilename Launcher = "launcher-config.yaml"
+configFilename Topology = "wallet-topology.yaml"
+
 data CI
   = Appveyor
   | Travis
   | Buildkite
   | Manual
   deriving (Bounded, Enum, Eq, Read, Show)
-
--- | What runtime config file to generate.
-data ConfigRequest = ConfigRequest
-  { rOS      :: OS
-  , rCluster :: Cluster
-  , rConfig  :: Config
-  } deriving (Eq, Show)
 
 newtype AppName      = AppName      { fromAppName      :: Text } deriving (Eq, IsString, Show)
 newtype BuildJob     = BuildJob     { fromBuildJob     :: Text } deriving (Eq, IsString, Show)
@@ -74,3 +72,6 @@ testInstaller    False  = DontTestInstaller
 
 lshowText :: Show a => a -> Text
 lshowText = toLower . Universum.show
+
+errorT :: Text -> a
+errorT = error . unpack

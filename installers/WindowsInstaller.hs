@@ -204,10 +204,7 @@ main opts@Options{..}  = do
         fullName    = "daedalus-win64-" <> fromVer fullVersion <> "-" <> lshowText oCluster <> "-installer.exe"
     TIO.writeFile "version.txt" $ fromVer fullVersion
 
-    echo "Generating configuration file:  launcher-config.yaml"
-    generateConfig (ConfigRequest Win64 oCluster Launcher) "./dhall" "launcher-config.yaml"
-    echo "Generating configuration file:  wallet-topology.yaml"
-    generateConfig (ConfigRequest Win64 oCluster Topology) "./dhall" "wallet-topology.yaml"
+    generateOSConfigs (mkStubConfigRequest "./dhall") Win64
 
     echo "Packaging frontend"
     packageFrontend
