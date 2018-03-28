@@ -28,19 +28,21 @@ detectCI = do
 
 main :: IO ()
 main = do
-  (options', command) <- options "Daedalus installer generator" $
-    (,) <$> optionsParser <*> commandParser
-  options  <- (\ci -> options' { oCI = ci }) <$> detectCI
-
   let os = case Sys.os of
              "linux"   -> Linux
              "darwin"  -> Macos64
              "mingw32" -> Win64
              _         -> error ("Unsupported OS: " <> pack Sys.os)
 
+  (options', command) <- options "Daedalus installer generator" $
+    (,) <$> optionsParser os <*> commandParser
+  options <- (\ci -> options' { oCI = ci }) <$> detectCI
+
   case command of
-    GenConfig cfreq ->
-      generateOSConfigs cfreq os
+    GenConfig{..}    ->
+      generateOSClusterConfigs cfDhallRoot cfOutdir options
+    CheckConfigs{..} ->
+      checkAllConfigs          cfDhallRoot
     GenInstaller -> do
       putStrLn $ "Generating installer for " <>  Sys.os <> "-" <> Sys.arch
       case os of

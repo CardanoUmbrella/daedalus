@@ -2,6 +2,7 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE OverloadedStrings #-}
 module Types
   (  -- * Atomic types
     OS(..)
@@ -26,7 +27,9 @@ where
 import           Data.Text                           (Text, toLower, unpack)
 import           Data.String                         (IsString)
 import qualified Universum
-import           Prelude
+
+import           Filesystem.Path.CurrentOS           (FilePath)
+import           Prelude                      hiding (FilePath)
 
 
 
@@ -34,7 +37,7 @@ data OS
   = Linux
   | Macos64
   | Win64
-  deriving (Bounded, Enum, Eq, Show)
+  deriving (Bounded, Enum, Eq, Read, Show)
 
 data Cluster
   = Mainnet

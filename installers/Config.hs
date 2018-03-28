@@ -3,12 +3,12 @@
 {-# LANGUAGE OverloadedStrings   #-}
 {-# LANGUAGE RecordWildCards     #-}
 
+{-# LANGUAGE StandaloneDeriving  #-}
 {-# LANGUAGE TypeOperators     #-}
 {-# LANGUAGE DataKinds         #-}
 module Config
-  ( ConfigRequest, mkStubConfigRequest
-  , checkAllConfigs
-  , generateOSConfigs
+  ( checkAllConfigs
+  , generateOSClusterConfigs
   , OS(..), Cluster(..), Config(..), Backend(..)
   , optReadLower, argReadLower
   , Options(..), optionsParser
@@ -18,32 +18,27 @@ module Config
   ) where
 
 import qualified Control.Exception                as Ex
-import           Control.Monad                       (forM_)
 
 import qualified Data.ByteString                  as BS
 import qualified Data.Map                         as Map
 import           Data.Maybe
 import           Data.Optional                       (Optional)
-import           Data.Semigroup                      ((<>))
-import           Data.Text                           (Text, pack, unpack, intercalate, toLower, unlines)
+import           Data.Text                           (Text, pack, unpack, intercalate, toLower)
 import qualified Data.Yaml                        as YAML
 
 import qualified Dhall                            as Dhall
 import qualified Dhall.JSON                       as Dhall
 
-import           Filesystem.Path.CurrentOS           (encodeString)
+import           Filesystem.Path.CurrentOS           (FilePath, fromText, encodeString, encodeString)
 import qualified GHC.IO.Encoding                  as GHC
 
-import qualified System.Environment               as Sys
 import qualified System.IO                        as Sys
-import qualified System.IO.Temp                   as Sys
 import qualified System.Exit                      as Sys
 
-import           Text.Printf                         (printf)
-import           Turtle                              (optional, (<|>), format, (%), s)
+import           Turtle                              (optional, (<|>), (</>), (<.>), format, (%), s)
 import           Turtle.Options
 
-import           Prelude                      hiding (unlines, writeFile)
+import           Prelude                      hiding (FilePath, unlines, writeFile)
 import           Types
 
 
@@ -71,34 +66,30 @@ argReadLower = arg (diagReadCaseInsensitive . unpack)
 data Backend
   = Cardano { cardanoDaedalusBridge :: FilePath }
   | Mantis
-  deriving (Eq, Read, Show)
+  deriving (Eq, Show)
 
-data ConfigRequest = ConfigRequest
-  { cfrCardano           :: Text
-  , cfrConfigFiles       :: Text
-  , cfrDaedalusFrontend  :: Text
-  , cfrDhallRoot         :: Text
-  } deriving (Eq, Show)
-
-renderConfigRequest :: ConfigRequest -> Text
-renderConfigRequest ConfigRequest{..} = unlines
-  [ "{ cardano          = \""<> cfrCardano          <> "\""
-  , ", configFiles      = \""<> cfrConfigFiles      <> "\""
-  , ", daedalusFrontend = \""<> cfrDaedalusFrontend <> "\""
-  , "}"]
+-- instance Read FilePath where
+--   readPrec = fromText . pack <$> Read.lift (Read.munch1 $ const True)
 
 data Command
-  = GenConfig ConfigRequest
+  = GenConfig
+    { cfDhallRoot   :: FilePath
+    , cfOutdir      :: FilePath
+    }
+  | CheckConfigs
+    { cfDhallRoot   :: FilePath
+    }
   | GenInstaller
   deriving (Eq, Show)
 
 data Options = Options
   { oBackend        :: Backend
   , oBuildJob       :: Maybe BuildJob
+  , oOS             :: OS
   , oCluster        :: Cluster
   , oAppName        :: AppName
   , oDaedalusVer    :: Version
-  , oOutput         :: Text
+  , oOutput         :: FilePath
   , oPullReq        :: Maybe PullReq
   , oTestInstaller  :: TestInstaller
   , oCI             :: CI
@@ -107,32 +98,31 @@ data Options = Options
 commandParser :: Parser Command
 commandParser = (fromMaybe GenInstaller <$>) . optional $
   subcommandGroup "Subcommands:"
-  [ ("config",     "Build configs for an OS",
-      (GenConfig <$>) $
-      ConfigRequest
-       <$> (fromMaybe "/nix/store/HASH-cardano-sl.stub"
-                      <$> (optional $ optText "cardano"            's' "Path to cardano-sl"))
-       <*> (fromMaybe "/nix/store/HASH-config-files.stub"
-                      <$> (optional $ optText "config-files"       'c' "Config files directory"))
-       <*> (fromMaybe "/nix/store/HASH-daedalus-frontend.stub"
-                      <$> (optional $ optText "daedalus-frontend"  'f' "Daedalus frontend directory"))
-       <*> optText "dhall-root"  'r' "Directory containing Dhall config files")
+  [ ("config",        "Build configs for an OS / cluster  (see: --os, --cluster top-level options)",
+      GenConfig
+      <$> (fromText <$> argText "INDIR"  "Directory containing Dhall config files")
+      <*> (fromText <$> argText "OUTDIR" "Target directory for generated YAML config files"))
+  , ("check-configs", "Verify all Dhall-defined config components",
+      CheckConfigs
+      <$> (fromText <$> argText "DIR" "Directory containing Dhall config files"))
   , ("installer",  "Build an installer",
       pure GenInstaller)
   ]
 
-optionsParser :: Parser Options
-optionsParser = Options
+optionsParser :: OS -> Parser Options
+optionsParser detectedOS = Options
   <$> backendOptionParser
   <*> (optional      $
       (BuildJob     <$> optText "build-job"           'b' "CI Build Job/ID"))
+  <*> (fromMaybe detectedOS <$> (optional $
+                   optReadLower "os"                  's' "OS, defaults to host OS.  One of:  linux macos64 win64"))
   <*> (fromMaybe Mainnet    <$> (optional $
                    optReadLower "cluster"             'c' "Cluster the resulting installer will target:  mainnet or staging"))
   <*> (fromMaybe "daedalus" <$> (optional $
       (AppName      <$> optText "appname"             'n' "Application name:  daedalus or..")))
   <*> (fromMaybe "dev"   <$> (optional $
       (Version      <$> optText "daedalus-version"    'v' "Daedalus version string")))
-  <*> (fromMaybe (error "--output not specified for 'installer' subcommand")
+  <*> (fromMaybe (error "--output not specified for 'installer' subcommand") . (fromText <$>)
        <$> (optional $  optText "output"              'o' "Installer output file"))
   <*> (optional   $
       (PullReq      <$> optText "pull-request"        'r' "Pull request #"))
@@ -143,42 +133,35 @@ optionsParser = Options
 backendOptionParser :: Parser Backend
 backendOptionParser = cardano <|> mantis <|> pure (Cardano "")
   where
-    cardano = Cardano . encodeString <$> optPath "cardano" 'C'
+    cardano = Cardano <$> optPath "cardano" 'C'
       "Use Cardano backend with given Daedalus bridge path"
     mantis = switch "mantis" 'M' "Use Mantis (ETC) backend" *> pure Mantis
 
 
 
-dhallTopExpr :: ConfigRequest -> Text -> Config -> OS -> Cluster -> Text
-dhallTopExpr ConfigRequest{..} installation cfg os cluster
-  | Launcher <- cfg = format (s%" "%s%" ("%s%" "%s%" "%s%" )") (comp Launcher) (comp cluster) (comp os) (comp cluster) installation
-  | Topology <- cfg = format (s%" "%s)                         (comp Topology) (comp cluster)
-  where comp x = format (s%"/"%s%".dhall") cfrDhallRoot (lshowText x)
+dhallTopExpr :: FilePath -> Config -> OS -> Cluster -> Text
+dhallTopExpr dhallRoot cfg os cluster
+  | Launcher <- cfg = format (s%" "%s%" ("%s%" "%s%" )") (comp Launcher) (comp cluster) (comp os) (comp cluster)
+  | Topology <- cfg = format (s%" "%s)                   (comp Topology) (comp cluster)
+  where comp x = pack . encodeString $ dhallRoot </> fromText (lshowText x) <.> "dhall"
 
-forOSConfigValues :: (Cluster -> Config -> YAML.Value -> IO a) -> ConfigRequest -> OS -> IO ()
-forOSConfigValues action cfreq os = do
-  tmpdir       <- fromMaybe "/tmp" <$> Sys.lookupEnv "TMPDIR"
-  installation <- Sys.writeTempFile tmpdir "installation-dhall-" $ unpack $ renderConfigRequest cfreq
-  sequence [ action cluster cfg =<<
-             (Dhall.detailed $ Dhall.codeToValue "(stdin)" $ dhallTopExpr cfreq (pack installation) cfg os cluster)
-           | cluster <- enumFromTo minBound maxBound
-           , cfg     <- enumFromTo minBound maxBound ]
-  pure ()
+forConfigValues :: FilePath -> OS -> Cluster -> (Config -> YAML.Value -> IO a) -> IO ()
+forConfigValues dhallRoot os cluster action = do
+  sequence_ [ action cfg =<<
+              (handle $ Dhall.detailed $ Dhall.codeToValue "(stdin)" $ dhallTopExpr dhallRoot cfg os cluster)
+            | cfg     <- enumFromTo minBound maxBound ]
 
-mkStubConfigRequest :: Text -> ConfigRequest
-mkStubConfigRequest cfrDhallRoot = ConfigRequest
-  { cfrCardano          = ""
-  , cfrConfigFiles      = ""
-  , cfrDaedalusFrontend = ""
-  , .. }
+checkAllConfigs :: FilePath -> IO ()
+checkAllConfigs dhallRoot =
+  sequence_ [ forConfigValues dhallRoot os cluster (\_ _ -> pure ())
+            | os      <- enumFromTo minBound maxBound
+            , cluster <- enumFromTo minBound maxBound ]
 
-checkAllConfigs :: Text -> IO ()
-checkAllConfigs = forM_ (enumFromTo minBound maxBound) . forOSConfigValues (\_ _ _ -> pure ()) . mkStubConfigRequest
-
-generateOSConfigs :: ConfigRequest -> OS -> IO ()
-generateOSConfigs = forOSConfigValues $ \_ config val -> do
-  GHC.setLocaleEncoding GHC.utf8
-  BS.writeFile (configFilename config) $ YAML.encode val
+generateOSClusterConfigs :: FilePath -> FilePath -> Options -> IO ()
+generateOSClusterConfigs dhallRoot outDir Options{..} = forConfigValues dhallRoot oOS oCluster $
+  \config val -> do
+    GHC.setLocaleEncoding GHC.utf8
+    BS.writeFile (encodeString $ outDir </> configFilename config) $ YAML.encode val
 
 -- | Generic error handler: be it encoding/decoding, file IO, parsing or type-checking.
 handle :: IO a -> IO a
